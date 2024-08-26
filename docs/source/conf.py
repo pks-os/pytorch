@@ -626,8 +626,6 @@ coverage_ignore_functions = [
     # torch.distributed.rpc.internal
     "deserialize",
     "serialize",
-    # torch.distributed.tensor.parallel.api
-    "parallelize_module",
     # torch.distributed.tensor.parallel.input_reshard
     "input_reshard",
     # torch.distributed.tensor.parallel.loss

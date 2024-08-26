@@ -14,7 +14,6 @@ from torch.distributed._tensor import (
     DTensor,
     init_device_mesh,
 )
-from torch.distributed._tensor.debug import CommDebugMode
 from torch.distributed._tensor.placement_types import (
     DTensorSpec,
     Partial,
@@ -22,6 +21,7 @@ from torch.distributed._tensor.placement_types import (
     Shard,
     TensorMeta,
 )
+from torch.distributed.tensor.debug import CommDebugMode
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -909,7 +909,7 @@ class TestDTensorPlacementTypes(DTensorTestBase):
                 ]
                 assert_array_equal(expected_pad_sizes, pad_sizes)
 
-                from torch.distributed._tensor._collective_utils import unpad_tensor
+                from torch.distributed.tensor._collective_utils import unpad_tensor
 
                 unpadded_list = [
                     unpad_tensor(tensor, shard_placement.dim, pad_sizes[i])
