@@ -4,6 +4,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import functools
+import heapq
 import itertools
 import logging
 import math
@@ -2459,6 +2460,48 @@ class Scheduler:
 
         return schedule
 
+    def topological_sort_bfs(
+        self, nodes: List[BaseSchedulerNode]
+    ) -> List[BaseSchedulerNode]:
+        """
+        A BFS topological sort that selects nodes with the least number of unmet dependencies first.
+        """
+
+        def _node_priority(node) -> List[int]:
+            assert node.indegree == 0
+            ids = sorted({pred_node.taken_index for pred_node in node.pred_nodes})
+            ids.append(node.index)
+            return ids
+
+        # compute nodes' number of unmet dependencies (for schedulability)
+        # initialize the list of nodes ready to be scheduled
+        nodes_to_schedule = []
+        for t, node in enumerate(nodes):
+            node.index = t
+            # note that .unmet_dependencies could have deps with the same name
+            # and in that case, it should only be counted once
+            node.indegree = len(node.pred_nodes)
+            if node.indegree == 0:
+                heapq.heappush(nodes_to_schedule, (_node_priority(node), node))
+
+        # schedule nodes one at a time
+        schedule: List[BaseSchedulerNode] = []
+        while nodes_to_schedule:
+            # select a node to schedule
+            selected_node = heapq.heappop(nodes_to_schedule)[1]
+            selected_node.taken_index = len(schedule)
+            schedule.append(selected_node)
+
+            # update successor nodes and nodes_to_schedule
+            for succ_node in selected_node.succ_nodes:
+                assert succ_node.indegree > 0
+                succ_node.indegree -= 1
+                if succ_node.indegree == 0:
+                    heapq.heappush(
+                        nodes_to_schedule, (_node_priority(succ_node), succ_node)
+                    )
+        return schedule
+
     def reorder_for_peak_memory(
         self,
         nodes: List[BaseSchedulerNode],
@@ -2484,6 +2527,11 @@ class Scheduler:
         order_lpmf = self.topological_sort_lpmf(nodes)
         peak_memory_lpmf = self.estimate_peak_memory(order_lpmf)
         peak_memory_diff_methods.append([order_lpmf, peak_memory_lpmf])
+
+        # bfs based method
+        order_bfs = self.topological_sort_bfs(nodes)
+        peak_memory_bfs = self.estimate_peak_memory(order_bfs)
+        peak_memory_diff_methods.append([order_bfs, peak_memory_bfs])
 
         # get the optimal one
         best_result = min(peak_memory_diff_methods, key=lambda x: x[1])
