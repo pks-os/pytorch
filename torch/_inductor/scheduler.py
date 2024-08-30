@@ -94,6 +94,8 @@ class SchedulerBuffer:
     node: ir.Buffer
     defining_op: BaseSchedulerNode
     users: List[NodeUser] = dataclasses.field(default_factory=list)
+    size_alloc: int = 0
+    size_free: int = 0
 
     def __hash__(self) -> int:
         return hash(self.node.name)
@@ -1794,6 +1796,7 @@ class Scheduler:
         self.mutation_renames: Dict[str, str] = {}
 
         self.compute_dependencies()
+        self.compute_size_for_scheduler_buffer()
         self.nodes = self.topological_sort_schedule(self.nodes)
         self.dead_node_elimination()
         self.name_to_fused_node = {n.get_name(): n for n in self.nodes}
@@ -2135,6 +2138,40 @@ class Scheduler:
         # copy user information onto freeable input buffers
         for input_buf_name, input_buf in self.name_to_input_buf.items():
             input_buf.set_users(name_to_users[input_buf_name].items)
+
+    def compute_size_for_scheduler_buffer(self) -> None:
+        """
+        Compute the size of each scheduler buffer, including (1) memory allocated when
+        it is created and (2) memory deallocated when it is freed.
+        We specially handle the case of MultiOutputLayout.
+        Consider the following case:
+          buf0 = some_ops_with_multi_outputs(...)
+          buf1 = buf0[0] # assume 10 bytes
+          buf2 = buf0[1] # assume 20 bytes
+        In such cases,
+          * buf0: at creation, 30 bytes allocated, when deleted, 0 bytes freed
+          * buf1: at creation, 0 bytes allocated, when deleted, 10 bytes freed
+          * buf2: at creation, 0 bytes allocated, when deleted, 20 bytes freed
+        # TODO(xuanzh): handle buffer_reuse or inplace_buffers
+        """
+        # compute the size of SchedulerBuffer without MultiOutputLayout layout
+        for sched_buf in self.name_to_buf.values():
+            if not isinstance(sched_buf.node.layout, MultiOutputLayout):
+                sched_buf.size_alloc = V.graph.sizevars.size_hint(
+                    sched_buf.node.get_numel(), fallback=0
+                ) * get_dtype_size(sched_buf.node.get_dtype())
+                sched_buf.size_free = sched_buf.size_alloc
+
+        # compute the size of SchedulerBuffer with MultiOutputLayout layout
+        for sched_buf in self.name_to_buf.values():
+            if isinstance(sched_buf.node.layout, MultiOutputLayout):
+                for user in sched_buf.users:
+                    if isinstance(user.node, OutputNode):
+                        continue
+                    assert isinstance(user.node, BaseSchedulerNode)
+                    for buf in user.node.get_outputs():
+                        sched_buf.size_alloc += buf.size_alloc
+                        buf.size_alloc = 0
 
     def dead_node_elimination(self) -> None:
         """
