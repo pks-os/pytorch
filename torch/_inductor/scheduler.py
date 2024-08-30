@@ -73,6 +73,7 @@ class InputBuffer:
     dep: Dep
     size_free: int
     users: List[NodeUser] = dataclasses.field(default_factory=list)
+    succ_nodes: OrderedSet[BaseSchedulerNode] = dataclasses.field(default_factory=set)
 
     def get_name(self) -> str:
         return self.dep.name
@@ -96,6 +97,7 @@ class SchedulerBuffer:
     users: List[NodeUser] = dataclasses.field(default_factory=list)
     size_alloc: int = 0
     size_free: int = 0
+    succ_nodes: OrderedSet[BaseSchedulerNode] = dataclasses.field(default_factory=set)
 
     def __hash__(self) -> int:
         return hash(self.node.name)
@@ -1817,6 +1819,9 @@ class Scheduler:
         if config._pre_fusion_custom_pass is not None:
             self.nodes = config._pre_fusion_custom_pass(self.nodes)
         self.nodes = self.fuse_nodes(self.nodes)
+        if config.estimate_peak_memory:
+            self.assign_successor_nodes_to_buffers()
+            _ = self.estimate_peak_memory(self.nodes, verbose=True)
         self.merge_loops()
         self.finalize_multi_template_buffers()
         if config.reorder_for_compute_comm_overlap:
@@ -2209,6 +2214,105 @@ class Scheduler:
         # Prune any WeakDeps no longer needed
         for node in self.nodes:
             node.prune_weak_deps()
+
+    def assign_successor_nodes_to_buffers(self) -> None:
+        """
+        For each SchedulerBuffer and InputBuffer, assign its successor nodes.
+        A buffer's successor nodes determines when a buffer can be freed.
+        Note this is different from .users because users correspond to non-fused
+        singleton nodes, whereas successor nodes correspond to nodes after the
+        fusion decisions and reflect dependency changes as a result of fusion.
+        """
+        # first add successor nodes for scheduler buffers
+        for buf in self.name_to_buf.values():
+            for user in buf.users:
+                if isinstance(user.node, OutputNode):
+                    continue
+                if buf.get_name() not in {
+                    dep.name for dep in user.node.read_writes.reads
+                }:
+                    continue
+                fused_node = self.name_to_fused_node.get(user.node.get_name())
+                if fused_node:
+                    buf.succ_nodes.add(fused_node)
+            # in case of fusion, a buffer can be used by the fused node itself
+            # and in this case, it should NOT be part of successor nodes
+            self_node = self.name_to_fused_node.get(buf.defining_op.get_name())
+            if self_node in buf.succ_nodes:
+                buf.succ_nodes.remove(self_node)
+
+        # then add successor nodes for freeable input buffers
+        for buf in self.name_to_input_buf.values():
+            for user in buf.users:
+                fused_node = self.name_to_fused_node.get(user.node.get_name())
+                if fused_node:
+                    buf.succ_nodes.add(fused_node)
+
+    def estimate_peak_memory(
+        self, nodes: List[BaseSchedulerNode], verbose: bool = False
+    ) -> int:
+        """
+        Given a list of nodes in their execution order, estimate the peak memory, by
+        keeping track of the liveliness of SchedulerBuffers and InputBuffers.
+        """
+
+        # map each scheduler buffer to its size, start time, and end time
+        @dataclasses.dataclass
+        class BufferInfo:
+            buffer: Union[SchedulerBuffer, InputBuffer]
+            size_alloc: int
+            size_free: int
+            start_time: int
+            end_time: int
+
+        name_to_buf_info: Dict[str, BufferInfo] = {}
+        node_name_to_time: Dict[str, int] = {}
+
+        # assign start_time
+        for buf_name, buf in self.name_to_input_buf.items():
+            name_to_buf_info[buf_name] = BufferInfo(
+                buf, buf.size_free, buf.size_free, 0, 0
+            )
+        for t, node in enumerate(nodes):
+            node_name_to_time[node.get_name()] = t
+            for buf in node.get_outputs():
+                name_to_buf_info[buf.get_name()] = BufferInfo(
+                    buf, buf.size_alloc, buf.size_free, t, t
+                )
+
+        # assign end_time
+        for buf_name, buf_info in name_to_buf_info.items():
+            succ_node_time = [
+                node_name_to_time[succ_node.get_name()]
+                for succ_node in buf_info.buffer.succ_nodes
+                if succ_node.get_name() in node_name_to_time
+            ]
+            if succ_node_time:
+                buf_info.end_time = max(succ_node_time)
+
+        # the end time of output buffers should be at the end of the horizon
+        for buf_name in V.graph.get_output_names():
+            if buf_name in name_to_buf_info:
+                name_to_buf_info[buf_name].end_time = len(nodes) - 1
+
+        # incremental memory changes at each time period
+        memory = [0 for _ in range(len(nodes) + 1)]
+
+        # for each buffer, update memory when created and when freed
+        for buf_name, buf_info in name_to_buf_info.items():
+            memory[buf_info.start_time] += buf_info.size_alloc
+            memory[buf_info.end_time + 1] -= buf_info.size_free
+
+        # get peak memory by compute the cumulative memories
+        max_memory = 0
+        cur_memory = 0
+        for t in range(len(nodes) + 1):
+            cur_memory += memory[t]
+            max_memory = max(max_memory, cur_memory)
+
+        if verbose:
+            print(f"estimated peak memory is {round(max_memory / 2**30, 2)} GiB")
+        return max_memory
 
     def topological_sort_schedule(
         self, nodes: List[BaseSchedulerNode]
