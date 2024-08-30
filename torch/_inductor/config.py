@@ -251,7 +251,13 @@ reorder_for_compute_comm_overlap_passes = [
 ]
 
 # estimate peak memory via liveliness analysis
-estimate_peak_memory = os.environ.get("TORCHINDUCTOR_ESTIMATE_PEAK_MEMORY") == "1"
+estimate_peak_memory = (
+    os.environ.get("TORCHINDUCTOR_ESTIMATE_PEAK_MEMORY") == "1"
+    or os.environ.get("TORCHINDUCTOR_REORDER_PEAK_MEMORY") == "1"
+)
+
+# enable operator reordering for peak memory optimization
+reorder_for_peak_memory = os.environ.get("TORCHINDUCTOR_REORDER_PEAK_MEMORY") == "1"
 
 # runtime estimation function for ops
 # for built-in estimation function, pass in "default"; for user-defined estimation function, pass in the function handle
