@@ -69,6 +69,26 @@ loop_ordering_log = torch._logging.getArtifactLogger(__name__, "loop_ordering")
 
 
 @dataclasses.dataclass
+class InputBuffer:
+    dep: Dep
+    size_free: int
+    users: List[NodeUser] = dataclasses.field(default_factory=list)
+
+    def get_name(self) -> str:
+        return self.dep.name
+
+    def set_users(self, users: List[NodeUser]) -> None:
+        # deduplicate
+        result: Dict[int, NodeUser] = {}
+        for use in users:
+            if id(use.node) in result:
+                result[id(use.node)] = use.merge(result[id(use.node)])
+            else:
+                result[id(use.node)] = use
+        self.users = list(result.values())
+
+
+@dataclasses.dataclass
 class SchedulerBuffer:
     scheduler: Scheduler
     node: ir.Buffer
@@ -1753,6 +1773,8 @@ class Scheduler:
             buf.get_name(): buf for node in self.nodes for buf in node.get_outputs()
         }
         self.name_to_fused_node: Dict[str, BaseSchedulerNode] = self.name_to_node.copy()
+        self.name_to_input_buf: Dict[str, InputBuffer] = {}
+        self.get_freeable_input_buf()
 
         # mutation_real_name: Maps back to the original name for codegen
         # Example:
@@ -1887,6 +1909,22 @@ class Scheduler:
         self.nodes = [
             node for node in self.nodes if node.get_name() not in removed_node_names
         ] + list(fe_nodes)
+
+    def get_freeable_input_buf(self) -> None:
+        """
+        Create and keep track of all input buffers that can be freed during the program
+        """
+        for node in self.nodes:
+            for dep in node.read_writes.reads:
+                if (
+                    dep.name in V.graph.graph_inputs
+                    and not dep.name.startswith("primals_")
+                    and dep.name not in self.name_to_input_buf
+                ):
+                    self.name_to_input_buf[dep.name] = InputBuffer(
+                        dep,
+                        self.dep_size_hint(dep),
+                    )
 
     def compute_dependencies(self) -> None:
         """
@@ -2093,6 +2131,10 @@ class Scheduler:
         for node in self.nodes:
             for buf in node.get_outputs():
                 buf.set_users(name_to_users[buf.get_name()].items)
+
+        # copy user information onto freeable input buffers
+        for input_buf_name, input_buf in self.name_to_input_buf.items():
+            input_buf.set_users(name_to_users[input_buf_name].items)
 
     def dead_node_elimination(self) -> None:
         """
