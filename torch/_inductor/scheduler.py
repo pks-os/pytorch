@@ -2533,12 +2533,17 @@ class Scheduler:
         peak_memory_bfs = self.estimate_peak_memory(order_bfs)
         peak_memory_diff_methods.append([order_bfs, peak_memory_bfs])
 
+        # dfs based method
+        order_dfs = self.topological_sort_schedule(nodes, order="size")
+        peak_memory_dfs = self.estimate_peak_memory(order_dfs)
+        peak_memory_diff_methods.append([order_dfs, peak_memory_dfs])
+
         # get the optimal one
         best_result = min(peak_memory_diff_methods, key=lambda x: x[1])
         return best_result[0]
 
     def topological_sort_schedule(
-        self, nodes: List[BaseSchedulerNode]
+        self, nodes: List[BaseSchedulerNode], order="default"
     ) -> List[BaseSchedulerNode]:
         """
         Ensure nodes is in topologically sorted order
@@ -2560,8 +2565,18 @@ class Scheduler:
         for node in nodes:
             for name in node.get_buffer_names():
                 name_to_node[name] = node
-        for node in nodes:
-            visit(node)
+        if order == "default":
+            for node in nodes:
+                visit(node)
+        if order == "size":
+            for t, node in enumerate(nodes):
+                node.index = t
+                node.size = sum(buffer.size_alloc for buffer in node.get_outputs())
+                node.measure = node.size + sum(
+                    pred_buf.size_free for pred_buf in node.pred_buffers
+                )
+            for node in sorted(nodes, key=lambda x: (x.measure, x.index)):
+                visit(node)
         return result
 
     def _get_unmet_dep_nodes(self, snode: BaseSchedulerNode) -> List[BaseSchedulerNode]:
