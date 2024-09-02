@@ -41,9 +41,9 @@ from torch.utils._triton import has_triton
 
 
 try:
-    from .mock_cache import global_stats, patch_fbcode, PatchCaches
+    from .mock_cache import global_stats, patch_fbcode, PatchCaches, Stats
 except ImportError:
-    from mock_cache import global_stats, patch_fbcode, PatchCaches  # @manual
+    from mock_cache import global_stats, patch_fbcode, PatchCaches, Stats  # @manual
 
 
 HAS_TRITON = has_triton()
@@ -190,10 +190,7 @@ class TestFxGraphCache(TestCase):
                     self.assertEqual(fn(a, b), compiled_fn(a, b))
                 reset()
 
-        global_stats.report()
-        self.assertEqual(global_stats.fx_graph.num_get_hit, 3)
-        self.assertEqual(global_stats.fx_graph.num_get_miss, 1)
-        self.assertEqual(global_stats.fx_graph.num_put, 1)
+        self.assertEqual(global_stats.fx_graph, Stats(1, 3, 1))
 
     @requires_triton()
     @config.patch({"fx_graph_cache": True})
@@ -799,6 +796,7 @@ class TestAutotuneCache(TestCase):
     @config.patch({"fx_graph_remote_cache": False})
     @config.patch({"autotune_local_cache": False})
     @config.patch({"autotune_remote_cache": True})
+    @config.patch({"bundled_autotune_cache": False})
     @config.patch({"max_autotune": True})
     @parametrize("fbcode", (False,) + (True,) * config.is_fbcode())
     def test_autotune_cache(self, fbcode: bool):
@@ -818,17 +816,50 @@ class TestAutotuneCache(TestCase):
         with PatchCaches(), patch_fbcode(fbcode):
             f_compiled(x, y, a, b)
 
-            self.assertEqual(global_stats.autotune.num_get_hit, 0)
-            self.assertEqual(global_stats.autotune.num_get_miss, 2)
-            self.assertEqual(global_stats.autotune.num_put, 2)
+            self.assertEqual(global_stats.autotune_remote, Stats(2, 0, 2))
 
             self.reset()
             f_compiled(x, y, a, b)
 
+        self.assertEqual(global_stats.autotune_remote, Stats(2, 2, 2))
+
+    @config.patch({"fx_graph_cache": False})
+    @config.patch({"fx_graph_remote_cache": False})
+    @config.patch({"autotune_local_cache": True})
+    @config.patch({"autotune_remote_cache": False})
+    @config.patch({"bundled_autotune_cache": True})
+    @config.patch({"max_autotune": True})
+    @parametrize("fbcode", (False,) + (True,) * config.is_fbcode())
+    def test_bundled_autotune_cache(self, fbcode: bool):
+        class Model(torch.nn.Module):
+            def forward(self, a, b, c, d, e, f):
+                return a + b, c + d, e + f
+
+        def f(a, b, c, d, e, f):
+            return Model()(a, b, c, d, e, f)
+
+        f_compiled = torch.compile(f, fullgraph=True)
+
+        a = torch.randn(101, 100).cuda()
+        b = torch.randn(101, 100).cuda()
+        c = torch.randn(102, 100).cuda()
+        d = torch.randn(102, 100).cuda()
+        e = torch.randn(103, 100).cuda()
+        f = torch.randn(103, 100).cuda()
+
+        with PatchCaches(), patch_fbcode(fbcode):
+            f_compiled(a, b, c, d, e, f)
+
+            global_stats.report()
+            self.assertEqual(global_stats.autotune_local, Stats(3, 0, 3))
+            self.assertEqual(global_stats.bundled_autotune, Stats(1, 0, 1))
+
+            self.reset()
+            f_compiled(a, b, c, d, e, f)
+
         global_stats.report()
-        self.assertEqual(global_stats.autotune.num_get_hit, 2)
-        self.assertEqual(global_stats.autotune.num_get_miss, 2)
-        self.assertEqual(global_stats.autotune.num_put, 2)
+        self.assertEqual(global_stats.autotune_local, Stats(6, 3, 3))
+        self.assertEqual(global_stats.bundled_autotune, Stats(1, 1, 1))
 
 
 class TestUtils(TestCase):

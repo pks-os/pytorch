@@ -457,6 +457,12 @@ def with_fresh_cache_if_config():
 
 
 def compile_fx_inner(*args, **kwargs):
+    #print("*** begin compile_fx_inner")
+    x = compile_fx_inner_(*args, **kwargs)
+    #print("*** end compile_fx_inner")
+    return x
+
+def compile_fx_inner_(*args, **kwargs):
     # Need with_fresh_cache_if_config for compile_fx_inner even if we already have one for
     # compile_fx. The reason is the compilation for backward graph may happen after
     # compile_fx return and we may want to use the _LazyGraphModule for compiling

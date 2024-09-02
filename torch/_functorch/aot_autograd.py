@@ -1094,6 +1094,7 @@ def aot_module_simplified(
     # convention.  This should get fixed...
     # NB: GraphModule/nn.Module rely on the non-boxed calling convention here
     def forward(*runtime_args: Tuple[Any]):
+        #print("*** aot_module_simplified.dispatch_and_compile.forward")
         full_args = []
         full_args.extend(params_flat)
         full_args.extend(runtime_args)

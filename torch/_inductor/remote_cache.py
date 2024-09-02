@@ -108,12 +108,20 @@ class RemoteCache(Generic[_T]):
         return self.serde.encode(value)
 
     def _get(self, key: str, sample: Optional[Sample]) -> Optional[_T]:
-        if data := self.backend.get(key):
+        if data := self._backend_get(key):
             return self._decode(data, sample)
         return None
 
+    # Returns _U - but we aren't actually generic on _U
+    def _backend_get(self, key: str) -> Any:
+        return self.backend.get(key)
+
     def _put(self, key: str, value: _T, sample: Optional[Sample]) -> None:
         data = self._encode(value, sample)
+        self._backend_put(key, data)
+
+    # Takes data: _U - but we aren't actually generic on _U
+    def _backend_put(self, key: str, data: Any) -> None:
         self.backend.put(key, data)
 
     def _create_sample(self) -> Optional[Sample]:
@@ -191,6 +199,10 @@ class RedisRemoteCache(RemoteCache[JsonDataTy]):
 
 
 class RemoteAutotuneCache(RedisRemoteCache):
+    pass
+
+
+class RemoteBundledAutotuneCache(RedisRemoteCache):
     pass
 
 

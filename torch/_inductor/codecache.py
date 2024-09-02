@@ -62,6 +62,9 @@ from torch._inductor.codegen.rocm.compile_command import (
 )
 from torch._utils_internal import log_cache_bypass
 
+from .remote_cache import JsonDataTy, RemoteCache
+from .runtime.autotune_cache import AutotuneCacheBundler
+
 
 T = TypeVar("T")
 
@@ -1471,8 +1474,13 @@ class CompiledFxGraph:
         self.boxed_forward_device_index = None
 
     def __call__(self, inputs: List[Any]) -> Any:
+        #print("*** CompiledFxGraph enter")
         assert self.current_callable is not None
-        return self.current_callable(inputs)
+        try:
+            return self.current_callable(inputs)
+        finally:
+            AutotuneCacheBundler.end_compile()
+            #print("*** CompiledFxGraph exit")
 
 
 def run_command_and_check(cmd_: str) -> None:
@@ -2853,6 +2861,21 @@ class PyCodeCache:
 
     @classmethod
     def load_by_key_path(
+        cls,
+        key: str,
+        path: str,
+        linemap: Optional[List[Tuple[int, str]]] = None,
+        attrs: Optional[Dict[str, Any]] = None,
+    ) -> ModuleType:
+        #print(f"*** before load_by_key_path({key}, {path})")
+        try:
+            x = cls.load_by_key_path_(key, path, linemap, attrs)
+        finally:
+            #print(f"*** after load_by_key_path({key}, {path})")
+        return x
+
+    @classmethod
+    def load_by_key_path_(
         cls,
         key: str,
         path: str,

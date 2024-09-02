@@ -1,6 +1,7 @@
 # mypy: allow-untyped-defs
 from __future__ import annotations
 
+import traceback
 import builtins
 import copy
 import functools
@@ -1320,6 +1321,22 @@ def triton_config_tiled_reduction(size_hints, x, y, r, num_stages=1):
 
 
 def pointwise(
+    size_hints,
+    triton_meta,
+    tile_hint=None,
+    filename=None,
+    min_elem_per_thread=0,
+    inductor_meta=None,
+):
+    #print("*** enter pointwise")
+    traceback.print_stack()
+    x = pointwise_(size_hints, triton_meta, tile_hint, filename, min_elem_per_thread, inductor_meta)
+    #print("*** exit pointwise")
+    # traceback.print_stack()
+    return x
+
+
+def pointwise_(
     size_hints,
     triton_meta,
     tile_hint=None,

@@ -35,9 +35,9 @@ from torch.testing._internal.inductor_utils import HAS_CPU, HAS_CUDA
 
 
 try:
-    from .mock_cache import global_stats, PatchCaches
+    from .mock_cache import global_stats, PatchCaches, Stats
 except ImportError:
-    from mock_cache import global_stats, PatchCaches  # @manual
+    from mock_cache import global_stats, PatchCaches, Stats  # @manual
 
 
 torch.set_float32_matmul_precision("high")
@@ -754,9 +754,7 @@ class TestMaxAutotuneRemoteCache(TestCase):
                     reset()
 
                 global_stats.report()
-                self.assertEqual(global_stats.autotune.num_get_hit, 3)
-                self.assertEqual(global_stats.autotune.num_get_miss, 1)
-                self.assertEqual(global_stats.autotune.num_put, 1)
+                self.assertEqual(global_stats.autotune_remote, Stats(1, 3, 1))
 
             global_stats.reset()
             for _ in range(4):
@@ -764,9 +762,7 @@ class TestMaxAutotuneRemoteCache(TestCase):
                     torch.compile(f, dynamic=dynamic)(x, y)
                 reset()
             global_stats.report()
-            self.assertEqual(global_stats.autotune.num_get_hit, 3)
-            self.assertEqual(global_stats.autotune.num_get_miss, 1)
-            self.assertEqual(global_stats.autotune.num_put, 1)
+            self.assertEqual(global_stats.autotune_remote, Stats(1, 3, 1))
 
 
 class TestBenchmarkRequest(BenchmarkRequest):

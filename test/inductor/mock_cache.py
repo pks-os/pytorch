@@ -51,14 +51,18 @@ class Stats:
 # it's a remote cache).
 
 
-class _GlobalStats(Stats, threading.local):
+class _GlobalStats(threading.local):
     def __init__(self) -> None:
-        self.autotune = Stats()
+        self.autotune_local = Stats()
+        self.autotune_remote = Stats()
+        self.bundled_autotune = Stats()
         self.fx_graph = Stats()
         self.triton = Stats()
 
     def reset(self) -> None:
-        self.autotune.reset()
+        self.autotune_local.reset()
+        self.autotune_remote.reset()
+        self.bundled_autotune.reset()
         self.fx_graph.reset()
         self.triton.reset()
 
@@ -68,7 +72,9 @@ class _GlobalStats(Stats, threading.local):
 
     def report(self):
         print("Cache Stats:", file=sys.stderr)
-        print(f"  autotune: {self.autotune}", file=sys.stderr)
+        print(f"  autotune_local: {self.autotune_local}", file=sys.stderr)
+        print(f"  autotune_remote: {self.autotune_remote}", file=sys.stderr)
+        print(f"  bundled_autotune: {self.bundled_autotune}", file=sys.stderr)
         print(f"  fx_graph: {self.fx_graph}", file=sys.stderr)
         print(f"  triton:   {self.triton}", file=sys.stderr)
 
@@ -111,7 +117,7 @@ _CACHE_CONFIG_EN = (
     "fx_graph_remote_cache",
     "autotune_local_cache",
     "autotune_remote_cache",
-    # "bundled_autotune_cache",
+    "bundled_autotune_cache",
 )
 
 
@@ -143,8 +149,20 @@ class PatchCaches(contextlib.AbstractContextManager):
         self._stack.__enter__()
 
         ctx = patch(
+            "torch._inductor.runtime.autotune_cache.LocalAutotuneCache.backend_override_cls",
+            MockBackend.with_name("autotune_local"),
+        )
+        self._stack.enter_context(ctx)
+
+        ctx = patch(
             "torch._inductor.remote_cache.RemoteAutotuneCache.backend_override_cls",
-            MockBackend.with_name("autotune"),
+            MockBackend.with_name("autotune_remote"),
+        )
+        self._stack.enter_context(ctx)
+
+        ctx = patch(
+            "torch._inductor.remote_cache.RemoteBundledAutotuneCache.backend_override_cls",
+            MockBackend.with_name("bundled_autotune"),
         )
         self._stack.enter_context(ctx)
 
@@ -157,7 +175,13 @@ class PatchCaches(contextlib.AbstractContextManager):
         if config.is_fbcode():
             ctx = patch(
                 "torch._inductor.fb.remote_cache.FbRemoteAutotuneCache.backend_override_cls",
-                MockBackend.with_name("autotune"),
+                MockBackend.with_name("autotune_remote"),
+            )
+            self._stack.enter_context(ctx)
+
+            ctx = patch(
+                "torch._inductor.fb.remote_cache.FbRemoteBundledAutotuneCache.backend_override_cls",
+                MockBackend.with_name("bundled_autotune"),
             )
             self._stack.enter_context(ctx)
 

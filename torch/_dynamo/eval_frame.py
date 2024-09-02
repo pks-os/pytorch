@@ -627,6 +627,7 @@ class DisableContext(_TorchDynamoContext):
 
         @functools.wraps(fn)
         def _fn(*args, **kwargs):
+            #print("*** DisableContext.__call__._fn")
             prior = _maybe_set_eval_frame(callback)
             try:
                 return fn(*args, **kwargs)

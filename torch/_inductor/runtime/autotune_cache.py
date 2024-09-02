@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 import dataclasses
 import hashlib
 import logging
@@ -38,7 +39,11 @@ class AutotuneCache:
     # Create a AutotuneCache. Returns None if none of the caches can be used.
     @staticmethod
     def create(
-        inductor_meta: _InductorMetaTy, filename: str, configs_hash: str
+        inductor_meta: _InductorMetaTy,
+        # TODO: I think the filename is really a hash of the source graph - so it's
+        # equal to saying "hash of source graph"?
+        filename: str,
+        configs_hash: str,
     ) -> Optional[AutotuneCache]:
         cache = AutotuneCache(configs_hash, filename)
         cache._setup_local_cache(inductor_meta, filename)
@@ -49,7 +54,7 @@ class AutotuneCache:
             return None
 
     # Read the best config options from the most local cache and return it.
-    def _read(self, inductor_meta: _InductorMetaTy) -> Optional[Dict[str, JsonDataTy]]:
+    def _read(self) -> Optional[Dict[str, JsonDataTy]]:
         if local_cache := self.local_cache:
             cache, key = local_cache
             if best_config := cache.get(key):
@@ -69,7 +74,7 @@ class AutotuneCache:
     def read_best(
         self, inductor_meta: _InductorMetaTy, configs: List[Config]
     ) -> Optional[Config]:
-        if best := self._read(inductor_meta):
+        if best := self._read():
             return _load_cached_autotuning(
                 best, self.configs_hash, configs, inductor_meta
             )
@@ -81,7 +86,7 @@ class AutotuneCache:
             return
 
         cache_filename = os.path.splitext(filename)[0] + ".best_config"
-        local_cache = RemoteCache(_LocalAutotuneCacheBackend(), RemoteCacheJsonSerde())
+        local_cache = LocalAutotuneCache()
         self.local_cache = (local_cache, cache_filename)
 
     # Set up remote caching information
@@ -91,9 +96,19 @@ class AutotuneCache:
         if not _should_use_remote_autotune_cache(inductor_meta):
             return
 
+        if (backend_hash := inductor_meta.get("backend_hash", None)) is None:
+            log.debug(
+                "backend_hash is not passed on the inductor_meta, unable to use autotune remote cache"
+            )
+            return
+        assert isinstance(backend_hash, str)
+
+        is_fbcode = bool(inductor_meta.get("is_fbcode", False))
+
         remote_cache = _create_cache(
-            inductor_meta,
             self.configs_hash,
+            backend_hash,
+            is_fbcode,
             "FbRemoteAutotuneCache",
             "RemoteAutotuneCache",
             "autotune-best-config-v2",
@@ -121,6 +136,7 @@ class AutotuneCache:
         if local_cache := self.local_cache:
             cache, key = local_cache
             cache.put(key, data)
+            AutotuneCacheBundler.put(key, data)
 
             if log.isEnabledFor(logging.DEBUG):
                 type_str = "coordesc" if found_by_coordesc else "heuristic"
@@ -129,6 +145,157 @@ class AutotuneCache:
         if remote_cache := self.remote_cache:
             cache, key = remote_cache
             cache.put(key, data)
+
+
+class AutotuneCacheBundler:
+    """
+    Caches a set of LocalAutotuneCacheBackend entries together in a single
+    cache.
+    """
+
+    # The current global AutotuneCacheBundler
+    _CURRENT: Optional[AutotuneCacheBundler] = None
+
+    _cache: RemoteCache[JsonDataTy]
+
+    # All known entries from LocalAutotuneCache.put()
+    _entries: Dict[str, JsonDataTy]
+
+    @classmethod
+    def begin_compile(
+        cls,
+        code_hash: str,
+    ) -> None:
+        #print("*** AutotuneCacheBundler.begin_compile")
+        # traceback.print_stack()
+
+        if cls._CURRENT is not None:
+            # We already saw a begin_compile() but never got the corresponding
+            # end_compile(). Likely this compile didn't actually generate
+            # autotune timings. Cancel the existing compile.
+            cls.cancel_compile()
+
+        if not cls._should_use_bundled_autotune_cache():
+            return None
+
+        cache = _create_cache(
+            code_hash,
+            cls._get_backend_hash(),
+            cls._get_is_fbcode(),
+            "FbRemoteBundledAutotuneCache",
+            "RemoteBundledAutotuneCache",
+            "bundled-autotune-best-configs-v1",
+        )
+        if not cache:
+            return None
+
+        # We're starting a compilation phase. We have a cache key for the code
+        # we're compiling. We'll get the individual autotune bundles later (via
+        # self.put()). For now create the AutotuneCacheBundler and try to load
+        # from the cache.
+
+        bundler = AutotuneCacheBundler(code_hash, cache)
+        if not bundler._load_cache():
+            # We couldn't load from the cache - so make it global. Later on if
+            # we add async load support then set _CURRENT here and clear it in
+            # `sync()` if the cache was loaded.
+            cls._CURRENT = bundler
+
+    @classmethod
+    def cancel_compile(cls) -> None:
+        cls._CURRENT = None
+
+    @classmethod
+    def end_compile(cls) -> None:
+        # This is called after the compile when all local caches have been filled.
+        #print("*** AutotuneCacheBundler.end_compile")
+        #traceback.print_stack()
+        if cur := cls._CURRENT:
+            cls._CURRENT = None
+            cur._end_compile()
+
+    def _end_compile(self) -> None:
+        # TODO: Do we need to compute time_taken_ms and encode that somehow?
+        self._cache.put("", self._entries)
+
+    @staticmethod
+    def sync() -> None:
+        #print("*** AutotuneCacheBundler.sync")
+        # We don't currently use this - but we could async load starting at
+        # `begin_compile` and wait for the load to be finished here.
+        pass
+
+    @classmethod
+    def put(cls, filename: str, data: JsonDataTy) -> None:
+        #print(f"*** AutotuneCacheBundler.put({filename})")
+        #traceback.print_stack()
+        if cur := AutotuneCacheBundler._CURRENT:
+            cur._put(filename, data)
+
+    def _put(self, filename: str, data: JsonDataTy) -> None:
+        # Do we need to worry about duplicates? We only have a single local fs
+        # entry - so probably not.
+        self._entries[filename] = data
+
+    def __init__(self, code_hash: str, cache: RemoteCache[JsonDataTy]) -> None:
+        self._cache = cache
+        self._entries = {}
+
+    @classmethod
+    def _should_use_bundled_autotune_cache(cls):
+        # TODO: Do we need to worry about non-runtime?
+        from .. import config
+
+        # The bundled autotune cache is only available if you've also got local
+        # caching enabled.
+        if (autotune_local_cache := config.autotune_local_cache) == False:
+            return False
+
+        # Check if the we're enabled via config
+        if (bundled_autotune_cache := config.bundled_autotune_cache) is not None:
+            return bool(bundled_autotune_cache)
+
+        if not cls._get_is_fbcode():
+            return False
+
+        # TODO: Should this be the same constant as the autotune cache or a different one?
+        try:
+            from torch._inductor.fb.remote_cache import REMOTE_CACHE_VERSION
+        except ModuleNotFoundError:
+            return False
+
+        # TODO: Should this be the same JK as the autotune cache or a different one?
+        jk = torch._utils_internal.justknobs_getval_int(
+            "pytorch/remote_cache:autotune_memcache_version"
+        )
+        return REMOTE_CACHE_VERSION >= jk
+
+    def _load_cache(self) -> bool:
+        # The single key is defined on construction of the cache.
+        entries = self._cache.get("")
+        if entries is None or not isinstance(entries, dict):
+            # We couldn't load the cache - so mark _entries as non-None so we
+            # store local cache values.
+            return False
+
+        # Go through the entries we got from the cache and save them locally.
+        for filename, data in entries.items():
+            local_cache = LocalAutotuneCache()
+            local_cache.put(filename, data)
+
+        return True
+
+    @staticmethod
+    def _get_is_fbcode() -> bool:
+        # TODO: Do we need to worry about non-runtime?
+        from .. import config
+
+        return config.is_fbcode()
+
+    @staticmethod
+    def _get_backend_hash() -> str:
+        # TODO: Do we need to worry about non-runtime?
+        return torch.utils._triton.triton_hash_with_backend()
 
 
 def _should_use_remote_autotune_cache(inductor_meta: Dict[str, object]) -> bool:
@@ -188,26 +355,18 @@ def _load_cached_autotuning(
 
 
 def _create_cache(
-    inductor_meta: Dict[str, object],
-    configs_hash: str,
+    key: str,
+    backend_hash: str,
+    is_fbcode: bool,
     fb_cache_cls: str,
     oss_cache_cls: str,
     salt: str,
 ) -> Optional[RemoteCache[JsonDataTy]]:
-    backend_hash = inductor_meta.get("backend_hash", None)
-    if backend_hash is None:
-        log.debug(
-            "backend_hash is not passed on the inductor_meta, unable to use autotune remote cache"
-        )
-        return None
-
-    assert isinstance(backend_hash, str)
-
-    key = backend_hash + configs_hash + salt
+    key = backend_hash + key + salt
     key = hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     try:
-        if inductor_meta.get("is_fbcode"):
+        if is_fbcode:
             import torch._inductor.fb.remote_cache
 
             cache_cls = getattr(torch._inductor.fb.remote_cache, fb_cache_cls)
@@ -235,3 +394,22 @@ class _LocalAutotuneCacheBackend(RemoteCacheBackend[bytes]):
     def put(self, key: str, data: bytes) -> None:
         with open(key, "wb") as fd:
             fd.write(data)
+
+
+class LocalAutotuneCache(RemoteCache[JsonDataTy]):
+    def __init__(self) -> None:
+        backend = _LocalAutotuneCacheBackend()
+        serde = RemoteCacheJsonSerde()
+        super().__init__(backend, serde)
+
+    @override
+    def _backend_get(self, key: str) -> JsonDataTy:
+        #print(f"*** LocalAutotuneCache.backend_get({key})")
+        AutotuneCacheBundler.sync()
+        return super()._backend_get(key)
+
+    @override
+    def _backend_put(self, key: str, data: JsonDataTy) -> None:
+        #print(f"*** LocalAutotuneCache.backend_put({key})")
+        AutotuneCacheBundler.put(key, data)
+        super()._backend_put(key, data)

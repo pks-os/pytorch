@@ -282,6 +282,7 @@ def _create_runtime_wrapper(
         )
 
     def runtime_wrapper(args: List[Any]):
+        #print("*** _create_runtime_wrapper.runtime_wrapper")
         # stash a ref to each input tensor we plan to use after the compiled function
         orig_inputs = {i: args[i] for i in epilogue_args_idx}
 
@@ -471,8 +472,10 @@ class FunctionalizedRngRuntimeWrapper(CompilerWrapper):
         *,
         runtime_metadata: ViewAndMutationMeta,
     ):
+        #print("*** FunctionalizedRngRuntimeWrapper.post_compile")
         @wraps(compiled_fn)
         def wrapper(runtime_args: List[Any]):
+            #print("*** FunctionalizedRngRuntimeWrapper.post_compile.wrapper")
             if runtime_metadata.is_rng_op_functionalized:
                 # Add the seed and offset to args
                 seed, offset = CUDARngStateHelper.get_torch_state_as_tuple()
@@ -654,10 +657,12 @@ class EffectTokensWrapper(CompilerWrapper):
         *,
         runtime_metadata: ViewAndMutationMeta,
     ):
+        #print("*** EffectTokensWrapper.post_compile")
         num_tokens = len(runtime_metadata.tokens)
 
         @wraps(compiled_fn)
         def inner_fn(args: List[Any]):
+            #print("*** EffectTokensWrapper.post_compile.inner_fn")
             if num_tokens > 0:
                 # Pass in forward effect tokens (See Note [Side-Effectful Tokens in AOTAutograd])
                 old_args = args

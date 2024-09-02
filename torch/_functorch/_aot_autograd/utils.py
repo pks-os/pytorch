@@ -114,6 +114,7 @@ def make_boxed_compiler(compiler):
 def call_func_at_runtime_with_args(
     f, args: Union[Tuple[Any], List[Any]], steal_args=False, disable_amp=False
 ):
+    #print("*** call_func_at_runtime_with_args")
     if not steal_args:
         args = list(args)
     assert isinstance(args, list)
