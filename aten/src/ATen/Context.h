@@ -84,6 +84,8 @@ class TORCH_API Context {
       return at::detail::getCUDAHooks().getDeviceFromPtr(data);
     } else if (device_type == at::kXPU) {
       return at::detail::getXPUHooks().getDeviceFromPtr(data);
+    } else if (device_type == at::kHPU) {
+      return at::detail::getHPUHooks().getDeviceFromPtr(data);
     } else if (device_type == at::kPrivateUse1) {
       return at::detail::getPrivateUse1Hooks().getDeviceFromPtr(data);
     } else {
@@ -344,6 +346,11 @@ class TORCH_API Context {
   void setAllowFP16ReductionCPU(bool);
 
  private:
+  void initHPUIfNeeded(c10::DeviceType p) {
+    if (p == c10::DeviceType::HPU) {
+      lazyInitHPU();
+    }
+  }
   static bool checkCuBLASConfigDeterministic();
   std::array<c10::once_flag, at::COMPILE_TIME_MAX_DEVICE_TYPES> init_;
   bool enabled_cudnn = true;
@@ -463,6 +470,10 @@ inline bool hasMAIA() {
 
 inline bool hasXPU() {
   return globalContext().hasXPU();
+}
+
+inline bool hasHPU() {
+  return globalContext().hasHPU();
 }
 
 // Despite its name, this function returns the number of *CUDA* GPUs.
