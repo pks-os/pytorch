@@ -57,6 +57,7 @@ struct TORCH_API ${op} : public ${superclass} {
 #endif
   using ${superclass}::${superclass};
   variable_list apply(variable_list&& grads) override;
+  variable_list apply_functional(variable_list&& grads, std::array<bool,${num_vars}> needs_input_grad);
   std::string name() const override { return "${op}"; }
   void release_variables() override {
     ${thread_lock}
@@ -64,6 +65,10 @@ struct TORCH_API ${op} : public ${superclass} {
   }
   ${will_release_variables}
   void compiled_args(CompiledNodeArgs& args) override;
+  ivalue_list get_state();
+  void set_state(ivalue_list state);
+  ivalue_list retrieve_saved(SwapSavedVariables& saved) override;
+  functional_apply_t get_functional() override;
   variable_list apply_with_saved(const variable_list& inputs, SwapSavedVariables& saved) override;
   ${saved_variables}
   ${saved_list_sizes}
@@ -83,6 +88,11 @@ void will_release_variables() override {
 FUNCTION_DEFINITION = CodeTemplate(
     """\
 variable_list ${op}::apply(variable_list&& grads) {
+  ${compute_grad_input_mask}
+  return apply_functional(std::move(grads), std::move(grad_input_mask));
+}
+
+variable_list ${op}::apply_functional(variable_list&& grads, std::array<bool,${num_vars}> needs_input_grad) {
   ${thread_lock}
   ${asserts}
   IndexRangeGenerator gen;
@@ -100,6 +110,30 @@ variable_list ${op}::apply_with_saved(const variable_list& grads, SwapSavedVaria
     ${apply_with_saved_after}
     return result;
 }
+ivalue_list ${op}::get_state() {
+  SavedState saved_state;
+  ${get_state}
+  return saved_state.stack;
+}
+void ${op}::set_state(ivalue_list state) {
+  SavedState saved_state;
+  saved_state.stack = std::move(state);
+  ${set_state}
+}
+ivalue_list ${op}::retrieve_saved(SwapSavedVariables& saved) {
+  ${apply_with_saved_before}
+  auto state = get_state();
+  ${apply_with_saved_after}
+  return state;
+}
+functional_apply_t ${op}::get_functional() {
+  ${compute_grad_input_mask}
+  return [grad_input_mask](const variable_list& inputs, const std::vector<c10::IValue>& saved) {
+    auto node = ${op}();
+    node.set_state(saved);
+    return node.apply_functional(variable_list(inputs), grad_input_mask);
+  };
+}
 """
 )
 
@@ -111,9 +145,21 @@ GRAD_INPUT_MASK = CodeTemplate(
 """
 )
 
+COMPUTE_GRAD_INPUT_MASK = CodeTemplate(
+    """\
+IndexRangeGenerator gen;
+${ix_ranges}
+auto grad_input_mask = std::array<bool, ${n}>{
+  ${masks}
+};\
+"""
+)
+
+
 DERIVATIVE_SINGLE = CodeTemplate(
     """\
-if (task_should_compute_output({ ${name}_ix })) {
+// if (functional || task_should_compute_output({ ${name}_ix })) {
+if (needs_input_grad[${needs_input_grad_counter}]) {
   auto grad_result = ${derivative};
   copy_range(grad_inputs, ${name}_ix, grad_result);
 }
@@ -126,7 +172,8 @@ if (task_should_compute_output({ ${name}_ix })) {
 # to each `Tensor`(s) of `self`, and the others.
 DERIVATIVE_SINGLE_FOREACH = CodeTemplate(
     """\
-if (task_should_compute_output({ ${name}_ix })) {
+// if (functional || task_should_compute_output({ ${name}_ix })) {
+if (needs_input_grad[${needs_input_grad_counter}]) {
   std::vector<Tensor> grad_result;
   grad_result.reserve(grads.size());
   for (const auto & i : c10::irange(grads.size())) {
@@ -143,7 +190,7 @@ if (task_should_compute_output({ ${name}_ix })) {
 
 DERIVATIVE_MULTI_COPY_RANGE = CodeTemplate(
     """\
-  if (task_should_compute_output({ ${name}_ix })) {
+  if (needs_input_grad[${needs_input_grad_counter}]) {
     copy_range(grad_inputs, ${name}_ix, std::get<${i}>(grad_result));
   }
 """
@@ -151,7 +198,7 @@ DERIVATIVE_MULTI_COPY_RANGE = CodeTemplate(
 
 DERIVATIVE_MULTI = CodeTemplate(
     """\
-if (task_should_compute_output({ ${idx_ranges} })) {
+if (${needs_input_grad}) {
   ${grad_input_mask}
   auto grad_result = ${derivative};
   ${copy_ranges}
@@ -551,8 +598,10 @@ def process_function(info: DifferentiabilityInfo, template: CodeTemplate) -> str
     compiled_args: list[str] = []
     apply_with_saved_before: list[str] = []
     apply_with_saved_after: list[str] = []
+    visited: list[str] = []
 
-    for arg in info.args_with_derivatives:
+    for idx, arg in enumerate(info.args_with_derivatives):
+        # compute_index_ranges.append(f"auto {arg.name}_ix = {idx};")
         if arg.type in TENSOR_LIST_LIKE_CTYPES:
             size = f"{arg.name}_size_"
             saved_list_sizes.append(f"size_t {arg.name}_size_;")
@@ -798,8 +847,10 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
             compiled_args.append(
                 f"args.collect({visit_name}, {'true' if is_output else 'false'});"
             )
+            visited.append((visit_name, "SavedVariable"))
         else:
             compiled_args.append(f"args.collect({visit_name});")
+            visited.append((visit_name, None))
         apply_with_saved_before.append(f"saved.before({visit_name});")
         apply_with_saved_after.append(f"saved.after({visit_name});")
 
@@ -837,6 +888,8 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
     ) -> tuple[bool, str]:
         formula = derivative.formula
         var_names = derivative.var_names
+        needs_input_grad_counter = 0
+
         if len(var_names) == 1:
             checks_any_grad_defined = False
             if "not_implemented" not in formula:
@@ -857,7 +910,11 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
                 derivative_template = DERIVATIVE_SINGLE
             return (
                 checks_any_grad_defined,
-                derivative_template.substitute(name=var_names[0], derivative=formula),
+                derivative_template.substitute(
+                    name=var_names[0],
+                    derivative=formula,
+                    needs_input_grad_counter=needs_input_grad_counter,
+                ),
             )
         else:
             if "grad_input_mask" in formula:
@@ -869,12 +926,14 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
                 )
             else:
                 grad_input_mask = ""
-            idx_ranges = ", ".join(f"{n}_ix" for n in var_names)
+            needs_input_grad = [f"needs_input_grad[{i}]" for i in range(len(var_names))]
+            needs_input_grad = " || ".join(needs_input_grad)
+            # idx_ranges = ", ".join(f"{n}_ix" for n in var_names)
             copy_ranges: list[str] = []
             for i, n in enumerate(var_names):
-                copy_ranges.append(DERIVATIVE_MULTI_COPY_RANGE.substitute(name=n, i=i))
+                copy_ranges.append(DERIVATIVE_MULTI_COPY_RANGE.substitute(name=n, i=i, needs_input_grad_counter=i))
             return False, DERIVATIVE_MULTI.substitute(
-                idx_ranges=idx_ranges,
+                needs_input_grad=needs_input_grad,
                 copy_ranges=copy_ranges,
                 derivative=formula,
                 grad_input_mask=grad_input_mask,
@@ -896,6 +955,7 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
             "bool any_grad_defined = any_variable_defined(grads);",
         )
 
+
     if info.name in UNTRACEABLE_FUNCTIONS:
         superclass = "Node"
     else:
@@ -906,8 +966,28 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
     )
     all_getter_definitions = "\n".join(getter_definitions)
 
+    get_state = "\n".join(
+        f"saved_state.collect({name}, shared_from_this());"
+        if meta == "SavedVariable"
+        else f"saved_state.collect({name});"
+        for name, meta in visited
+    )
+    set_state = "\n".join(f"saved_state.restore({name});" for name, meta in visited)
+
+    masks = [
+        f"task_should_compute_output({{ {n}_ix }})," for n in derivative.var_names
+    ]
+    compute_grad_input_mask = COMPUTE_GRAD_INPUT_MASK.substitute(
+        ix_ranges="\n".join([
+            f"auto {n}_ix = gen.range(1);" for n in derivative.var_names
+        ]),
+        n=len(derivative.var_names),
+        masks=masks);
+
     return template.substitute(
         op=info.op,
+        compute_grad_input_mask=compute_grad_input_mask,
+        num_vars=len(derivative.var_names),
         compute_index_ranges=compute_index_ranges,
         saved_variables=saved_variables,
         release_variables=release_variables,
@@ -922,4 +1002,6 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
         compiled_args=compiled_args,
         apply_with_saved_before=apply_with_saved_before,
         apply_with_saved_after=apply_with_saved_after,
+        get_state=get_state,
+        set_state=set_state,
     )

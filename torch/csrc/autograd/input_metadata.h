@@ -45,6 +45,16 @@ struct TORCH_API InputMetadata {
     return options_;
   }
 
+  InputMetadata& operator=(const InputMetadata& other) {
+    options_ = other.options_;
+    shape_ = other.shape_;
+    is_tensor_subclass_ = false;
+    is_nested_ = false;
+    stream_ = other.stream_;
+    was_default_constructed_ = true;
+    return *this;
+  }
+
   caffe2::TypeMeta dtype() const {
     return options_.dtype();
   }
@@ -103,7 +113,7 @@ struct TORCH_API InputMetadata {
   bool maybe_expandable_to(const at::Tensor& grad) const;
 
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
-  const at::TensorOptions options_;
+  at::TensorOptions options_;
   MetadataShape shape_;
   c10::Stream stream_ = c10::Stream(c10::Stream::Default::DEFAULT, device());
   bool is_tensor_subclass_ = false;

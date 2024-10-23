@@ -892,6 +892,236 @@ class SwapSavedVariables {
   StashedVars<at::IValue> stashed_ivalues;
 };
 
+struct SavedState {
+  std::vector<at::IValue> stack;
+  int64_t idx = 0;
+
+  void collect(
+      const SavedVariable& sv,
+      const std::shared_ptr<Node>& saved_for) {
+    stack.emplace_back(sv.unpack(saved_for));
+  }
+  void restore(SavedVariable& sv) {
+    sv = SavedVariable(stack[idx++].toTensor(), /*is_output*/ true);
+  }
+
+  void collect(
+      const std::vector<SavedVariable>& sv,
+      const std::shared_ptr<Node>& saved_for) {
+    collect(static_cast<int64_t>(sv.size()));
+    for (const auto& v : sv) {
+      collect(v, saved_for);
+    }
+  }
+  void restore(std::vector<SavedVariable>& sv) {
+    int64_t size = 0;
+    restore(size);
+    sv.clear();
+    for (int64_t idx = 0; idx < size; idx++) {
+      sv.emplace_back();
+      restore(sv.back());
+    }
+  }
+
+  void collect(const TypeAndSize& value) {
+    collect(value.sym_sizes);
+    collect(value.options);
+  }
+  void restore(TypeAndSize& value) {
+    restore(value.sym_sizes);
+    restore(value.options);
+  }
+
+  void collect(const InputMetadata& value) {
+    collect(value.options());
+    collect(value.shape_as_dim_vector().vec());
+    collect(value.is_tensor_subclass());
+    TORCH_INTERNAL_ASSERT(!value.is_nested_tensor());
+  }
+  // Special case: InputMetadata has no copy ctor
+  // TODO(rzou): ??
+  void restore(InputMetadata& value) {
+    at::TensorOptions options;
+    restore(options);
+    std::vector<at::SymInt> shape;
+    restore(shape);
+    bool is_tensor_subclass=false;
+    restore(is_tensor_subclass);
+    SymIntSmallVec sym_shape;
+    for (const auto& s : shape) {
+      sym_shape.emplace_back(s);
+    }
+    value = InputMetadata(
+        options,
+        sym_shape,
+        is_tensor_subclass,
+        /*is_nested=*/false);
+  }
+
+  void collect(const at::TensorOptions& value) {
+    collect(value.requires_grad_opt());
+    collect(value.memory_format_opt());
+    collect(value.device_opt());
+    collect(value.dtype_opt());
+    collect(value.layout_opt());
+    collect(value.pinned_memory_opt());
+  }
+  void restore(at::TensorOptions& value) {
+    auto result = at::TensorOptions();
+    c10::optional<bool> requires_grad_opt;
+    restore(requires_grad_opt);
+    if (requires_grad_opt) {
+      result = result.requires_grad(*requires_grad_opt);
+    }
+    c10::optional<c10::MemoryFormat> memory_format_opt;
+    restore(memory_format_opt);
+    if (memory_format_opt) {
+      result = result.memory_format(*memory_format_opt);
+    }
+    c10::optional<c10::Device> device_opt;
+    restore(device_opt);
+    if (device_opt) {
+      result = result.device(*device_opt);
+    }
+    c10::optional<caffe2::TypeMeta> dtype_opt;
+    restore(dtype_opt);
+    if (dtype_opt) {
+      result = result.dtype(*dtype_opt);
+    }
+    c10::optional<c10::Layout> layout_opt;
+    restore(layout_opt);
+    if (layout_opt) {
+      result = result.layout(*layout_opt);
+    }
+    c10::optional<bool> pinned_memory_opt;
+    restore(pinned_memory_opt);
+    if (pinned_memory_opt) {
+      result = result.pinned_memory(*pinned_memory_opt);
+    }
+  }
+
+  void collect(const caffe2::TypeMeta& value) {
+    collect(at::typeMetaToScalarType(value));
+  }
+  void restore(caffe2::TypeMeta& value) {
+    at::ScalarType result = at::kFloat;
+    restore(result);
+    value = caffe2::TypeMeta::fromScalarType(result);
+  }
+
+  template <typename T>
+  void collect(const c10::OptionalArray<T>& t) {
+    collect(t.list);
+  }
+  template <typename T>
+  void restore(c10::OptionalArray<T>& t) {
+    restore(t.list);
+  }
+
+  template <typename T>
+  void collect(const std::optional<T>& t) {
+    collect(t.has_value());
+    if (t.has_value()) {
+      collect(*t);
+    }
+  }
+  template <typename T>
+  void restore(c10::optional<T>& value) {
+    bool has_value = false;
+    restore(has_value);
+    T tmp;
+    if (has_value) {
+      restore(tmp);
+    }
+    value = tmp;
+  }
+
+  void collect(const at::TensorGeometry& t) {
+    collect(t.sym_sizes().vec());
+    collect(t.sym_strides().vec());
+    collect(t.sym_storage_offset());
+  }
+  void restore(at::TensorGeometry& t) {
+    std::vector<at::SymInt> sym_sizes;
+    std::vector<at::SymInt> sym_strides;
+    at::SymInt sym_storage_offset;
+    restore(sym_sizes);
+    restore(sym_strides);
+    restore(sym_storage_offset);
+    t = at::TensorGeometry(sym_sizes, sym_strides, sym_storage_offset);
+  }
+
+  template <typename T>
+  void collect(const std::vector<T>& t) {
+    collect(static_cast<int64_t>(t.size()));
+    for (const T& i : t) {
+      collect(i);
+    }
+  }
+  template <typename T>
+  void restore(std::vector<T>& t) {
+    int64_t size = 0;
+    restore(size);
+    t.clear();
+    for (int64_t idx = 0; idx < size; idx++) {
+      t.emplace_back();
+      restore(t.back());
+    }
+  }
+
+  void collect(const c10::SymInt& t) {
+    stack.emplace_back(t);
+  }
+  void restore(c10::SymInt& t) {
+    t = stack[idx++].toSymInt();
+  }
+
+  void collect(int64_t t) {
+    stack.emplace_back(t);
+  }
+  void restore(int64_t& t) {
+    t = stack[idx++].toInt();
+  }
+
+  template <class ivalue_t>
+  void collect_ivalue(const ivalue_t& t) {
+    stack.emplace_back(t);
+  }
+  template <class ivalue_t>
+  void restore_ivalue(ivalue_t& value) {
+    value = stack[idx++].to<ivalue_t>();
+  }
+#define COLLECT_RESTORE_IVALUE(ivalue_t)                   \
+  void collect(const ivalue_t& value) {                    \
+    return collect_ivalue<ivalue_t>(value);                \
+  }                                                        \
+  void collect(const std::vector<ivalue_t>& value) {       \
+    return collect_ivalue<std::vector<ivalue_t>>(value);   \
+  }                                                        \
+  void collect(const c10::optional<ivalue_t>& value) {     \
+    return collect_ivalue<c10::optional<ivalue_t>>(value); \
+  }                                                        \
+  void restore(ivalue_t& value) {                          \
+    return restore_ivalue<ivalue_t>(value);                \
+  }                                                        \
+  void restore(std::vector<ivalue_t>& value) {             \
+    return restore_ivalue<std::vector<ivalue_t>>(value);   \
+  }                                                        \
+  void restore(c10::optional<ivalue_t>& value) {           \
+    return restore_ivalue<c10::optional<ivalue_t>>(value); \
+  }
+  COLLECT_RESTORE_IVALUE(at::Tensor)
+  COLLECT_RESTORE_IVALUE(c10::ScalarType)
+  COLLECT_RESTORE_IVALUE(c10::Scalar)
+  COLLECT_RESTORE_IVALUE(c10::Layout)
+  COLLECT_RESTORE_IVALUE(c10::Device)
+  COLLECT_RESTORE_IVALUE(c10::MemoryFormat)
+  COLLECT_RESTORE_IVALUE(bool)
+  COLLECT_RESTORE_IVALUE(double)
+  COLLECT_RESTORE_IVALUE(std::string)
+#undef COLLECT_RESTORE_IVALUE
+};
+
 } // namespace torch::dynamo::autograd
 
 template <>

@@ -451,6 +451,142 @@ void set_ivalue_proxies(
   }
 }
 
+static variable_list call_apply_functional(
+    PyObject* py_compiler,
+    const NodeCall& call,
+    const variable_list& inputs,
+    const ivalue_list& saved_state) {
+  auto fn = call.node->get_functional();
+
+  // Store the types of the inputs.
+  // We need this to go from PyObject* to IValue
+  std::vector<at::TypePtr> schema;
+  schema.reserve(saved_state.size());
+  for (const auto& ivalue : saved_state) {
+    schema.emplace_back(ivalue.type());
+  }
+
+  // This is the function we're passing to Python
+  auto apply_functional = py::cpp_function(
+      [schema, fn](
+          std::vector<c10::optional<at::Tensor>>& inputs,
+          const py::args& args) -> py::object {
+        std::vector<at::IValue> stack;
+        TORCH_INTERNAL_ASSERT(args.size() == schema.size());
+        auto tuple_args = jit::tuple_slice(args);
+        for (uint64_t idx = 0; idx < schema.size(); idx++) {
+          stack.emplace_back(
+              jit::toIValue(tuple_args[idx], schema[idx], c10::nullopt));
+        }
+        std::vector<at::Tensor> inputs_;
+        for (const auto& inp : inputs) {
+          if (inp.has_value()) {
+            inputs_.emplace_back(*inp);
+          } else {
+            inputs_.emplace_back();
+          }
+        }
+        auto outputs = fn(inputs_, stack);
+        return jit::toPyObject(at::IValue(outputs));
+      });
+
+  PyObject* py_saved_state =
+      PyTuple_New(static_cast<Py_ssize_t>(schema.size()));
+  for (const auto i : c10::irange(schema.size())) {
+    py::object obj = jit::toPyObject(saved_state[i]);
+    Py_INCREF(obj.ptr());
+    PyTuple_SET_ITEM(py_saved_state, i, obj.ptr());
+  }
+
+  py::handle handle(py_compiler);
+  py::object stuff = handle.attr("apply_functional")(
+      call.node->name(), apply_functional, inputs, py::handle(py_saved_state), call.node->num_outputs());
+  variable_list outputs = py::cast<variable_list>(stuff);
+  return outputs;
+}
+
+static variable_list call_validate_outputs(
+    PyObject* py_compiler,
+    const variable_list& inputs,
+    const std::vector<c10::optional<InputMetadata>>& input_metadata) {
+
+  SavedState state;
+  state.collect(input_metadata);
+  ivalue_list& saved_state = state.stack;
+
+  // Store the types of the inputs.
+  // We need this to go from PyObject* to IValue
+  std::vector<at::TypePtr> schema;
+  schema.reserve(saved_state.size());
+  for (const auto& ivalue : saved_state) {
+    schema.emplace_back(ivalue.type());
+  }
+
+  auto validate_outputs_functional = py::cpp_function([schema](
+      std::vector<c10::optional<at::Tensor>>& inputs,
+      const py::args& args) -> py::object {
+        std::vector<at::IValue> stack;
+        auto tuple_args = jit::tuple_slice(args);
+        for (uint64_t idx = 0; idx < schema.size(); idx++) {
+          stack.emplace_back(
+              jit::toIValue(tuple_args[idx], schema[idx], c10::nullopt));
+        }
+        SavedState r;
+        r.stack = std::move(stack);
+        std::vector<c10::optional<InputMetadata>> value;
+        r.restore(value);
+
+        std::vector<at::Tensor> inputs_;
+        for (const auto& inp : inputs) {
+          if (inp.has_value()) {
+            inputs_.emplace_back(*inp);
+          } else {
+            inputs_.emplace_back();
+          }
+        }
+        torch::autograd::validate_outputs(value, inputs_,
+          [&](const std::string& msg) {
+            std::ostringstream ss;
+            ss << "[Compiled Autograd Tracing:]"
+               << msg;
+            return ss.str();
+          });
+        return jit::toPyObject(at::IValue(inputs_));
+  });
+
+  PyObject* py_saved_state =
+      PyTuple_New(static_cast<Py_ssize_t>(schema.size()));
+  for (const auto i : c10::irange(schema.size())) {
+    py::object obj = jit::toPyObject(saved_state[i]);
+    Py_INCREF(obj.ptr());
+    PyTuple_SET_ITEM(py_saved_state, i, obj.ptr());
+  }
+
+  py::handle handle(py_compiler);
+  py::object stuff = handle.attr("validate_outputs")(
+      validate_outputs_functional,
+      inputs,
+      py::handle(py_saved_state));
+
+  variable_list outputs = py::cast<variable_list>(stuff);
+  return outputs;
+}
+
+static at::Tensor call_accumulate(
+    PyObject* py_compiler,
+    const at::Tensor& old_var,
+    const at::Tensor& new_var) {
+  if (!old_var.defined()) {
+    return new_var;
+  }
+  if (!new_var.defined()) {
+    return old_var;
+  }
+  py::handle handle(py_compiler);
+  py::object stuff = handle.attr("accumulate")(old_var, new_var);
+  return py::cast<at::Tensor>(stuff);
+}
+
 static TraceState call_begin_capture(
     PyObject* self,
     CacheNode& cache,
@@ -666,17 +802,17 @@ CacheNode* _compiled_autograd_impl(
           set_node_origin, "OIO", node_name.get(), i, pyobj, nullptr));
 
       SwapSavedVariables saved(compiler_call, state, py_compiler.get(), call);
-      variable_list outputs = call.node->apply_with_saved(inputs, saved);
+      auto saved_state = call.node->retrieve_saved(saved);
+      auto outputs =
+          call_apply_functional(py_compiler, call, inputs, saved_state);
+      // variable_list outputs = call.node->apply_with_saved(inputs, saved);
 
       saved.debug_asserts();
       saved.before(call.node->next_edges());
-      validate_outputs(
-          call.node->next_edges(), outputs, [&](const std::string& msg) {
-            std::ostringstream ss;
-            ss << "[Compiled Autograd Tracing: " << call.node->name() << "] "
-               << msg;
-            return ss.str();
-          });
+
+      auto input_metadata = collect_input_metadata(call.node->next_edges());
+      outputs = call_validate_outputs(py_compiler, outputs, input_metadata);
+
       saved.after(call.node->next_edges());
       saved.debug_asserts();
 
@@ -698,9 +834,8 @@ CacheNode* _compiled_autograd_impl(
         auto& output = outputs[i];
         const auto& next = call.node->next_edge(i);
         if (next.is_valid() && output.defined()) {
-          input_buffers.lookup(next.function.get())
-              .add(
-                  next.input_nr, std::move(output), std::nullopt, std::nullopt);
+          auto& buffer = input_buffers.lookup(next.function.get());
+          buffer.buffer[next.input_nr] = call_accumulate(py_compiler, buffer.buffer[next.input_nr], output);
         }
       }
     }

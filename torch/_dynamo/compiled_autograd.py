@@ -25,6 +25,7 @@ from torch.fx.experimental.proxy_tensor import (
     PythonKeyTracer,
     track_tensor_tree,
 )
+import torch.utils._pytree as pytree
 from torch.fx.experimental.symbolic_shapes import DimDynamic, ShapeEnv
 from torch.fx.traceback import preserve_node_meta, set_stack_trace
 from torch.utils._traceback import CapturedTraceback
@@ -56,6 +57,34 @@ def maybe_clone(x):
     if x is not None:
         return clone_preserve_strides(x)
     return x
+
+counter = 0
+
+class OpNamespace:
+    def __init__(self):
+        self.next_id = {}
+
+    def add(self, base_name, fn):
+        if base_name not in self.next_id:
+            self.next_id[base_name] = 0
+        nid = self.next_id[base_name]
+        name = f"{base_name}_{nid}"
+        self.next_id[base_name] += 1
+        result = Op(name, fn)
+        setattr(self, name, result)
+        return result
+
+class Op:
+    def __init__(self, name, fn):
+        self.fn = fn
+        self.__name__ = name
+        self.__module__ = "torch._dynamo.compiled_autograd.ops"
+
+    def __call__(self, *args, **kwargs):
+        return self.fn(*args, **kwargs)
+
+
+ops = OpNamespace()
 
 
 class AutogradCompilerInstance:
@@ -183,6 +212,45 @@ class AutogradCompilerInstance:
                 )
             self.bind_tensors_to_proxies(grad_ins, proxies)
         return tuple(grad_ins)
+
+    def allocate_dummy(self, *examples):
+        with disable_proxy_modes_tracing():
+            return torch.zeros(0)
+
+    def apply_functional(self, debug_name, fn, inputs, stack, num_outputs):
+        proxy_inputs, proxy_stack = pytree.tree_map(lambda t: self.to_proxy(t) if isinstance(t, torch.Tensor) else t,  (inputs, stack))
+        op = ops.add("apply_functional", fn)
+        proxy_out = self.fx_tracer.create_proxy(
+            "call_function",
+            op,
+            args=(proxy_inputs, *proxy_stack),
+            kwargs={})
+        result = [self.allocate_dummy(*inputs, *stack) for _ in range(num_outputs)]
+        self.bind_tensors_to_proxies(result, [proxy_out[i] for i in range(num_outputs)])
+        return result
+
+    def validate_outputs(self, fn, outputs, stack):
+        proxy_outputs, proxy_stack = pytree.tree_map(lambda t: self.to_proxy(t) if isinstance(t, torch.Tensor) else t, (outputs, stack))
+        op = ops.add("validate_outputs", fn)
+        new_proxy_outputs = self.fx_tracer.create_proxy(
+            "call_function",
+            op,
+            args=(proxy_outputs, *proxy_stack),
+            kwargs={})
+        self.bind_tensors_to_proxies(outputs, new_proxy_outputs)
+        return outputs
+
+    def accumulate(self, old_var, new_var):
+        old_var_proxy = self.to_proxy(old_var)
+        new_var_proxy = self.to_proxy(new_var)
+        proxy_out = self.fx_tracer.create_proxy(
+            "call_function",
+            torch.add,
+            args=(old_var_proxy, new_var_proxy),
+            kwargs={})
+        result = self.allocate_dummy(old_var)
+        self.bind_tensors_to_proxies([result], [proxy_out])
+        return result
 
     def proxy_call_hook(self, hook, *args, **kwargs):
         return self.fx_tracer.create_proxy(
@@ -456,8 +524,6 @@ class AutogradCompilerInstance:
             return [self.to_proxy(x) for x in t]
         if isinstance(t, tuple):
             return tuple(self.to_proxy(x) for x in t)
-        # can it be torch.SymInt as the code used to imply?
-        assert isinstance(t, torch.Tensor)
         proxy_tensor = fetch_object_proxy(self.fx_tracer, t)
         assert isinstance(proxy_tensor, torch.fx.experimental.proxy_tensor._ProxyTensor)
         return proxy_tensor.proxy
