@@ -102,6 +102,7 @@ class AutogradCompilerInstance:
         self.proxy_mode = ProxyTorchDispatchMode(self.fx_tracer, "symbolic")
         self.hooks_proxy: Optional[Proxy] = None
         self.graph_placeholders = ["inputs", "sizes", "scalars", "hooks"]
+        self.old_inline_behavior = True
 
     def wrap_fake(self, x, source):
         assert isinstance(x, torch.Tensor)
@@ -218,6 +219,8 @@ class AutogradCompilerInstance:
             return torch.zeros(0)
 
     def apply_functional(self, debug_name, fn, inputs, stack, num_outputs):
+        if self.old_inline_behavior:
+            return fn(inputs, *stack)
         proxy_inputs, proxy_stack = pytree.tree_map(lambda t: self.to_proxy(t) if isinstance(t, torch.Tensor) else t,  (inputs, stack))
         op = ops.add("apply_functional", fn)
         proxy_out = self.fx_tracer.create_proxy(
@@ -230,6 +233,8 @@ class AutogradCompilerInstance:
         return result
 
     def validate_outputs(self, fn, outputs, stack):
+        if self.old_inline_behavior:
+            return fn(outputs, *stack)
         proxy_outputs, proxy_stack = pytree.tree_map(lambda t: self.to_proxy(t) if isinstance(t, torch.Tensor) else t, (outputs, stack))
         op = ops.add("validate_outputs", fn)
         new_proxy_outputs = self.fx_tracer.create_proxy(
@@ -241,6 +246,8 @@ class AutogradCompilerInstance:
         return outputs
 
     def accumulate(self, old_var, new_var):
+        if self.old_inline_behavior:
+            return torch.add(old_var, new_var)
         old_var_proxy = self.to_proxy(old_var)
         new_var_proxy = self.to_proxy(new_var)
         proxy_out = self.fx_tracer.create_proxy(
