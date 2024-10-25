@@ -26,3 +26,5 @@ leak:conda-linux-gnu-ld
 leak:crypto
 leak:c10::detail::intrusive_target_default_null_type
 leak:torch::detail::(anonymous namespace)::get_set_cached_attr
+leak:/opt/conda/envs/py_3.10
+leak:torch::jit::tensorexpr::TensorExprKernel::preAllocIntermediateBufs
