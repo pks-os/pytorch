@@ -201,7 +201,7 @@ if [[ "$BUILD_ENVIRONMENT" == *asan* ]]; then
     fi
     export UBSAN_OPTIONS=print_stacktrace=1:suppressions=$PWD/ubsan.supp
     # Suppress some hard to solve indirect leaks
-    export LSAN_OPTIONS="suppressions=$PWD/lsan.supp"
+    export LSAN_OPTIONS="verbosity=1:log_threads=1:suppressions=$PWD/lsan.supp"
     export PYTORCH_TEST_WITH_ASAN=1
     export PYTORCH_TEST_WITH_UBSAN=1
     # TODO: Figure out how to avoid hard-coding these paths
