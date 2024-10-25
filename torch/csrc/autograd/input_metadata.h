@@ -45,6 +45,14 @@ struct TORCH_API InputMetadata {
     return options_;
   }
 
+  // InputMetadata(InputMetadata& other) = default;
+  // InputMetadata(InputMetadata& other) {
+  //   options_ = other.options_;
+  //   shape_ = other.shape_;
+  //   is_tensor_subclass_ = false;
+  //   is_nested_ = false;
+  //   stream_ = other.stream_;
+  // }
   InputMetadata& operator=(const InputMetadata& other) {
     options_ = other.options_;
     shape_ = other.shape_;

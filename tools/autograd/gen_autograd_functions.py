@@ -57,7 +57,6 @@ struct TORCH_API ${op} : public ${superclass} {
 #endif
   using ${superclass}::${superclass};
   variable_list apply(variable_list&& grads) override;
-  variable_list apply_helper(variable_list&& grads, std::array<bool,${num_vars}> needs_input_grad);
   std::string name() const override { return "${op}"; }
   void release_variables() override {
     ${thread_lock}
@@ -66,7 +65,6 @@ struct TORCH_API ${op} : public ${superclass} {
   ${will_release_variables}
   void compiled_args(CompiledNodeArgs& args) override;
   ivalue_list get_state();
-  void set_state(ivalue_list state);
   ivalue_list retrieve_saved(SwapSavedVariables& saved) override;
   functional_apply_t get_functional() override;
   variable_list apply_with_saved(const variable_list& inputs, SwapSavedVariables& saved) override;
@@ -114,13 +112,9 @@ variable_list ${op}::apply_with_saved(const variable_list& grads, SwapSavedVaria
 }
 ivalue_list ${op}::get_state() {
   SavedState saved_state;
+  ${unpacks}
   ${get_state}
   return saved_state.stack;
-}
-void ${op}::set_state(ivalue_list state) {
-  SavedState saved_state;
-  saved_state.stack = std::move(state);
-  ${set_state}
 }
 ivalue_list ${op}::retrieve_saved(SwapSavedVariables& saved) {
   ${apply_with_saved_before}
@@ -129,18 +123,13 @@ ivalue_list ${op}::retrieve_saved(SwapSavedVariables& saved) {
   return state;
 }
 
-variable_list ${op}::apply_helper(variable_list&& grads, std::array<bool,${num_vars}> needs_input_grad) {
-  ${thread_lock}
-  ${asserts}
-  ${unpacks}
-  return ${op}_apply_functional(std::move(grads), needs_input_grad ${unpacked_saved_vars});
-}
 functional_apply_t ${op}::get_functional() {
   ${compute_needs_input_grad}
   return [grad_input_mask](const variable_list& inputs, const std::vector<c10::IValue>& saved) {
-    auto node = ${op}();
-    node.set_state(saved);
-    return node.apply_helper(variable_list(inputs), grad_input_mask);
+    SavedState state;
+    state.stack = saved;
+    ${saved_var_restores}
+    return ${op}_apply_functional(variable_list(inputs), grad_input_mask ${unpacked_saved_vars});
   };
 }
 """
@@ -166,7 +155,6 @@ auto grad_input_mask = std::array<bool, ${n}>{
 
 DERIVATIVE_SINGLE = CodeTemplate(
     """\
-// if (functional || task_should_compute_output({ ${name}_ix })) { ${idx}
 if (needs_input_grad[std::get<0>(${name}_ix)]) {
   auto grad_result = ${derivative};
   copy_range(grad_inputs, ${name}_ix, grad_result);
@@ -180,7 +168,6 @@ if (needs_input_grad[std::get<0>(${name}_ix)]) {
 # to each `Tensor`(s) of `self`, and the others.
 DERIVATIVE_SINGLE_FOREACH = CodeTemplate(
     """\
-// if (functional || task_should_compute_output({ ${name}_ix })) { ${idx}
 if (needs_input_grad[std::get<0>(${name}_ix)]) {
   std::vector<Tensor> grad_result;
   grad_result.reserve(grads.size());
@@ -998,11 +985,15 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
     all_getter_definitions = "\n".join(getter_definitions)
 
     get_state = "\n".join(
-        f"saved_state.collect({name}, shared_from_this());"
-        if meta == "SavedVariable"
-        else f"saved_state.collect({name});"
-        for name, meta in visited
+        f"saved_state.collect({name});"
+        for name in unpacked_saved_vars
     )
+    saved_var_restores = []
+    for typ, name in zip(unpacked_saved_vars_ref_type, unpacked_saved_vars):
+        if typ.endswith("&"):
+            typ = typ[:-1]
+        saved_var_restores.append(f"{typ} {name};")
+        saved_var_restores.append(f"state.restore({name});")
     set_state = "\n".join(f"saved_state.restore({name});" for name, meta in visited)
 
     masks = [
@@ -1024,6 +1015,7 @@ PyObject* THP${op}_${name}_getter(THPCppFunction *self, void *_unused) {
     return template.substitute(
         unpacks="\n".join(unpack),
         op=info.op,
+        saved_var_restores="\n".join(saved_var_restores),
         unpacked_saved_vars=unpacked_saved_vars,
         unpacked_saved_vars_signature=unpacked_saved_vars_signature,
         compute_needs_input_grad=compute_needs_input_grad,

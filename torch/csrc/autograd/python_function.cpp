@@ -32,6 +32,7 @@
 #include <torch/csrc/profiler/api.h>
 #include <torch/csrc/utils/python_strings.h>
 #include <torch/csrc/utils/tensor_dtypes.h>
+#include <torch/csrc/dynamo/python_compiled_autograd.h>
 
 #include <functional>
 #include <memory>
@@ -394,6 +395,95 @@ variable_list PyNode::apply_with_saved(
   saved.after(f->output_info);
   saved.after(f->input_info);
   return result;
+}
+
+ivalue_list PyNode::retrieve_saved(SwapSavedVariables& saved) {
+  auto f = (THPFunction*)obj;
+  saved.before(f->compiled_autograd_symints);
+  saved.before(f->saved_variables);
+  saved.before(f->needs_input_grad);
+  saved.before(f->materialize_non_diff_grads);
+  saved.before(f->output_info);
+  saved.before(f->input_info);
+
+  SavedState state;
+  state.collect(f->compiled_autograd_symints);
+  state.collect(f->saved_variables, shared_from_this());
+  // state.collect(f->needs_input_grad);
+  // state.collect(f->materialize_non_diff_grads);
+  // state.collect(f->output_info);
+  // state.collect(f->input_info);
+
+  saved.after(f->compiled_autograd_symints);
+  saved.after(f->saved_variables);
+  saved.after(f->needs_input_grad);
+  saved.after(f->materialize_non_diff_grads);
+  saved.after(f->output_info);
+  saved.after(f->input_info);
+
+  state.collect(f->compiled_autograd_symints);
+  state.collect(f->saved_variables, shared_from_this());
+  // state.collect(f->needs_input_grad);
+  // state.collect(f->materialize_non_diff_grads);
+  // state.collect(f->output_info);
+  // state.collect(f->input_info);
+
+  return state.stack;
+}
+
+// TODO(rzou): compiled autograd needs special handling of the following.
+std::function<
+    variable_list(const variable_list&, const std::vector<c10::IValue>&)>
+PyNode::get_functional() {
+  auto node = std::static_pointer_cast<PyNode>(shared_from_this());
+  // TODO(rzou): probably need to pre compute needs_input_grad
+  return [node](const variable_list& inputs, const std::vector<c10::IValue>& saved) {
+    SavedState state;
+    state.stack = saved;
+
+    auto f = (THPFunction*)node->obj;
+
+    state.restore(f->compiled_autograd_symints);
+    state.restore(f->saved_variables);
+    // state.restore(f->needs_input_grad);
+    // state.restore(f->materialize_non_diff_grads);
+    // state.restore(f->output_info);
+    // state.restore(f->input_info);
+
+    f->compiled_autograd_tracing = true;
+    variable_list result;
+    if (!node->compiled_autograd_should_lift()) {
+      if (node->_backward_state_idx.has_value()) {
+        PyObject* r = PyObject_CallMethod(
+            torch::dynamo::autograd::current_py_compiler(),
+            "bind_backward_state",
+            "i",
+            *node->_backward_state_idx);
+        if (r == nullptr) {
+          throw python_error();
+        }
+        THPObjectPtr prior(f->compiled_autograd_backward_state);
+        f->compiled_autograd_backward_state = r;
+        result = node->apply(variable_list(inputs));
+        Py_CLEAR(f->compiled_autograd_backward_state);
+        f->compiled_autograd_backward_state = prior.release();
+      } else {
+        result = node->apply(variable_list(inputs));
+      }
+    } else {
+      result = node->defer_to_dynamo(variable_list(inputs), torch::dynamo::autograd::current_py_compiler());
+    }
+    f->compiled_autograd_tracing = false;
+
+    state.restore(f->compiled_autograd_symints);
+    state.restore(f->saved_variables);
+    // state.restore(f->needs_input_grad);
+    // state.restore(f->materialize_non_diff_grads);
+    // state.restore(f->output_info);
+    // state.restore(f->input_info);
+
+    return result;
+  };
 }
 
 PyObject* PyNode::to_py_args(

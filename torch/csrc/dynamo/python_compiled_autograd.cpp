@@ -52,6 +52,12 @@ Notes:
 namespace torch::dynamo::autograd {
 using c10::SymInt;
 
+static PyObject* kPyCompiler;
+
+PyObject* current_py_compiler() {
+  return kPyCompiler;
+}
+
 static PyObject* wrap_int_list(const std::vector<int64_t>& inputs) {
   PyObject* pyinput = PyTuple_New(static_cast<Py_ssize_t>(inputs.size()));
   for (const auto i : c10::irange(inputs.size())) {
@@ -458,10 +464,12 @@ static variable_list call_apply_functional(
     const ivalue_list& saved_state) {
   auto fn = call.node->get_functional();
 
+  // std::cout << "call_apply_functional: " << call.node->name() << std::endl;
   // Store the types of the inputs.
   // We need this to go from PyObject* to IValue
   std::vector<at::TypePtr> schema;
   schema.reserve(saved_state.size());
+  // TODO(rzou): can't get the type of a tensor?
   for (const auto& ivalue : saved_state) {
     schema.emplace_back(ivalue.type());
   }
@@ -501,7 +509,17 @@ static variable_list call_apply_functional(
   py::handle handle(py_compiler);
   py::object stuff = handle.attr("apply_functional")(
       call.node->name(), apply_functional, inputs, py::handle(py_saved_state), call.node->num_outputs());
-  variable_list outputs = py::cast<variable_list>(stuff);
+  // Some of the might be None
+  variable_list outputs;
+  // TODO(rzou): go through the opposite of toPyObject
+  auto tmp = py::cast<std::vector<std::optional<at::Tensor>>>(stuff);
+  for (const auto& t : tmp) {
+    if (t.has_value()) {
+      outputs.emplace_back(t.value());
+    } else {
+      outputs.emplace_back();
+    }
+  }
   return outputs;
 }
 
@@ -519,6 +537,9 @@ static variable_list call_validate_outputs(
   std::vector<at::TypePtr> schema;
   schema.reserve(saved_state.size());
   for (const auto& ivalue : saved_state) {
+    // if (ivalue.isTensor() && !ivalue.toTensor().defined()) {
+    //   schema.emplace_back(c10::NoneType::get());
+    // } 
     schema.emplace_back(ivalue.type());
   }
 
@@ -568,7 +589,16 @@ static variable_list call_validate_outputs(
       inputs,
       py::handle(py_saved_state));
 
-  variable_list outputs = py::cast<variable_list>(stuff);
+  variable_list outputs;
+  // TODO(rzou): go through the opposite of toPyObject
+  auto tmp = py::cast<std::vector<std::optional<at::Tensor>>>(stuff);
+  for (const auto& t : tmp) {
+    if (t.has_value()) {
+      outputs.emplace_back(t.value());
+    } else {
+      outputs.emplace_back();
+    }
+  }
   return outputs;
 }
 
@@ -735,6 +765,7 @@ CacheNode* _compiled_autograd_impl(
     // cache miss, need to capture FX graph
     ClosingTHPObjectPtr py_compiler(
         check(PyObject_CallNoArgs((the_autograd_compiler))));
+    kPyCompiler = py_compiler.get();
 
     TraceState state = call_begin_capture(
         py_compiler, *cache, compiler_call, output_edges.size());
@@ -803,6 +834,15 @@ CacheNode* _compiled_autograd_impl(
 
       SwapSavedVariables saved(compiler_call, state, py_compiler.get(), call);
       auto saved_state = call.node->retrieve_saved(saved);
+      // std::cout << call.node->name() << std::endl;
+      // std::cout << saved_state.size() << std::endl;
+      // for (const auto& ivalue: saved_state) {
+      //   if (ivalue.isTensor()) {
+      //     std::cout << "tensor" << std::endl;
+      //   } else {
+      //     ivalue.dump();
+      //   }
+      // }
       auto outputs =
           call_apply_functional(py_compiler, call, inputs, saved_state);
       // variable_list outputs = call.node->apply_with_saved(inputs, saved);
@@ -840,6 +880,7 @@ CacheNode* _compiled_autograd_impl(
       }
     }
 
+    kPyCompiler = nullptr;
     PyObject* res = check(call_end_capture(py_compiler, state.outputs));
     TORCH_CHECK(PyTuple_Check(res), "Expected end_capture to return tuple");
     TORCH_CHECK(

@@ -923,6 +923,66 @@ struct SavedState {
     }
   }
 
+  /*
+  void collect(const PyObject*& t) {
+    collect_ivalue(t);
+  }
+  void restore(PyObject*& t) {
+    restore_ivalue(t);
+  }
+  */
+
+  /*
+  void collect(const VariableInfo& t) {
+    collect(t.layout);
+    collect(t.device);
+    collect(t.scalar_type);
+    collect(t.size);
+    collect(t.requires_grad);
+    collect(t.is_empty);
+  }
+  void restore(VariableInfo& t) {
+    at::Layout layout = at::Layout::Strided;
+    at::Device device = at::kCPU;
+    at::ScalarType scalar_type = at::kFloat;
+    std::vector<c10::SymInt> size;
+    bool requires_grad = false;
+    bool is_empty = false;
+    restore(layout);
+    restore(device);
+    restore(scalar_type);
+    restore(requires_grad);
+    restore(is_empty);
+    t.layout = layout;
+    t.device=device;
+    t.scalar_type=scalar_type;
+    t.size = size;
+    t.requires_grad = requires_grad;
+    t.is_empty = is_empty;
+  }
+  */
+
+  void collect(size_t t) {
+    collect(static_cast<int64_t>(t));
+  }
+  void restore(size_t& t) {
+    int64_t tmp = 0;
+    restore(tmp);
+    t = static_cast<size_t>(tmp);
+  }
+
+  // TODO: probably wildly inefficient
+  template <class T>
+  void collect(const c10::List<T> t) {
+    collect(t.vec());
+  }
+  template <class T>
+  void restore(c10::List<T>& t) {
+    std::vector<T> tmp;
+    restore(tmp);
+    t = c10::List<T>(tmp);
+  }
+
   void collect(const TypeAndSize& value) {
     collect(value.sym_sizes);
     collect(value.options);
@@ -957,6 +1017,95 @@ struct SavedState {
         is_tensor_subclass,
         /*is_nested=*/false);
   }
+
+  void collect(const ska::flat_hash_map<std::string,at::IValue>& dct) {
+    std::vector<std::string> keys;
+    std::vector<at::IValue> values;
+    for (const auto& [key, value] : dct) {
+      keys.emplace_back(key);
+      values.emplace_back(value);
+    }
+    collect(keys);
+    collect(values);
+    /*
+    int64_t size = static_cast<int64_t>(keys.size());
+    collect(size);
+    for (const auto i : c10::irange(size)) {
+      collect(keys[i]);
+      collect(values[i]);
+    }
+    */
+  }
+  void collect(const at::IValue& iv) {
+    stack.emplace_back(iv);
+  }
+  void restore(at::IValue& iv) {
+    iv = stack[idx++];
+  }
+  void restore(ska::flat_hash_map<std::string,at::IValue>& dct) {
+    std::vector<std::string> keys;
+    std::vector<at::IValue> values;
+    restore(keys);
+    restore(values);
+    dct.clear();
+    for (const auto i : c10::irange(keys.size())) {
+      dct.insert({keys[i], values[i]});
+    }
+  }
+
+  /*
+  void collect(const at::IValue& iv) {
+    // used by AutogradContext::saved_data from CppNode
+    int64_t tag = 0;
+    if (iv.isTensor()) {
+      collect(tag);
+      collect(iv.toTensor());
+    } else if (iv.isInt()) {
+      tag = 1;
+      collect(tag);
+      collect(iv.toInt());
+    } else if (iv.isSymInt()) {
+      tag = 2;
+      collect(tag);
+      collect(iv.toSymInt());
+    } else if (iv.isDouble()) {
+      tag = 3;
+      collect(tag);
+      collect(iv.toDouble());
+    } else {
+      std::string msg = "Compiled autograd can't handle this ivalue";
+      TORCH_CHECK_NOT_IMPLEMENTED(false, msg);
+    }
+  }
+  void restore(at::IValue& iv) {
+    int64_t tag = 0;
+    collect(tag);
+    switch (tag) {
+      case 0: {
+        at::Tensor t;
+        restore(t);
+        iv = t;
+      }
+      case 1: {
+        int64_t t = 0;
+        restore(t);
+        iv = t;
+      }
+      case 2: {
+        c10::SymInt t = 0;
+        restore(t);
+        iv = t;
+      }
+      case 3: {
+        double t = 0;
+        restore(t);
+        iv = t;
+      }
+      default:
+        TORCH_INTERNAL_ASSERT(false);
+    }
+  }
+  */
 
   void collect(const at::TensorOptions& value) {
     collect(value.requires_grad_opt());
@@ -1083,6 +1232,20 @@ struct SavedState {
     t = stack[idx++].toInt();
   }
 
+  void collect(const std::vector<c10::SymInt>& t) {
+    collect_ivalue(t);
+  }
+  void restore(std::vector<c10::SymInt>& t) {
+    t = stack[idx++].toSymIntVector();
+  }
+
+  void collect(const std::vector<int64_t>& t) {
+    collect_ivalue(t);
+  }
+  void restore(std::vector<int64_t>& t) {
+    t = stack[idx++].toIntVector();
+  }
+
   template <class ivalue_t>
   void collect_ivalue(const ivalue_t& t) {
     stack.emplace_back(t);
@@ -1111,6 +1274,7 @@ struct SavedState {
     return restore_ivalue<c10::optional<ivalue_t>>(value); \
   }
   COLLECT_RESTORE_IVALUE(at::Tensor)
+  // COLLECT_RESTORE_IVALUE(at::SymInt)
   COLLECT_RESTORE_IVALUE(c10::ScalarType)
   COLLECT_RESTORE_IVALUE(c10::Scalar)
   COLLECT_RESTORE_IVALUE(c10::Layout)

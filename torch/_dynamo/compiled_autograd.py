@@ -220,7 +220,8 @@ class AutogradCompilerInstance:
 
     def apply_functional(self, debug_name, fn, inputs, stack, num_outputs):
         if self.old_inline_behavior:
-            return fn(inputs, *stack)
+            result = fn(inputs, *stack)
+            return result
         proxy_inputs, proxy_stack = pytree.tree_map(lambda t: self.to_proxy(t) if isinstance(t, torch.Tensor) else t,  (inputs, stack))
         op = ops.add("apply_functional", fn)
         proxy_out = self.fx_tracer.create_proxy(
