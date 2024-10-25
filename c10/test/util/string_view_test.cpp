@@ -70,6 +70,7 @@ static_assert(4 == hell.size(), "");
 static_assert(string_equal("hell", hell.data(), hell.size()), "");
 } // namespace test_sized_constructor
 
+#ifndef fbcode_caffe2
 namespace test_string_constructor {
 void test_conversion_is_implicit(string_view a) {}
 TEST(StringViewTest, testStringConstructor) {
@@ -97,6 +98,7 @@ TEST(StringViewTest, testStringViewConstructor) {
   test_std_string_view_conversion_is_implicit(hello_std_sv);
 }
 } // namespace test_std_string_view_constructor
+#endif
 
 namespace test_conversion_to_string {
 TEST(StringViewTest, testConversionToString) {
@@ -109,6 +111,7 @@ TEST(StringViewTest, testConversionToString) {
 }
 } // namespace test_conversion_to_string
 
+#ifndef fbcode_caffe2
 namespace test_conversion_to_std_string_view {
 TEST(StringViewTest, testConversionToString) {
   c10::string_view_ext empty;
@@ -119,6 +122,7 @@ TEST(StringViewTest, testConversionToString) {
   EXPECT_EQ(std::string_view("hello"), hello_str);
 }
 } // namespace test_conversion_to_std_string_view
+#endif
 
 namespace test_copy_constructor {
 constexpr string_view hello = "hello";
