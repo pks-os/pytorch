@@ -35,6 +35,7 @@ from inductor.test_torchinductor import (  # @manual=fbcode//caffe2/test/inducto
 
 
 class MPSBasicTests(TestCase):
+    is_dtype_supported = CommonTemplate.is_dtype_supported
     common = check_model_gpu
     device = "mps"
 
@@ -49,6 +50,7 @@ class MPSBasicTests(TestCase):
     test_cat_empty = CommonTemplate.test_cat_empty
     test_cat_unbacked_empty_1d = CommonTemplate.test_cat_unbacked_empty_1d
     test_floordiv = CommonTemplate.test_floordiv
+    test_full_truncation = CommonTemplate.test_full_truncation
     test_fmod = CommonTemplate.test_fmod
     test_fmod_zero_dim = CommonTemplate.test_fmod_zero_dim
     test_index_dynamic_shapes = CommonTemplate.test_index_dynamic_shapes
@@ -64,9 +66,13 @@ class MPSBasicTests(TestCase):
     test_remove_no_ops = CommonTemplate.test_remove_no_ops
     test_reflection_pad2d = CommonTemplate.test_reflection_pad2d
     test_rsqrt = CommonTemplate.test_rsqrt
+    test_scalar_cpu_tensor_arg = CommonTemplate.test_scalar_cpu_tensor_arg
+    test_scalar_output = CommonTemplate.test_scalar_output
+    test_setitem_with_int_parameter = CommonTemplate.test_setitem_with_int_parameter
     test_signbit = CommonTemplate.test_signbit
     test_silu = CommonTemplate.test_silu
     test_slice_scatter4 = CommonTemplate.test_slice_scatter4
+    test_sort = CommonTemplate.test_sort
     test_tanh = CommonTemplate.test_tanh
     test_view_as_complex = CommonTemplate.test_view_as_complex
     test_view_on_aliased = CommonTemplate.test_view_on_aliased
