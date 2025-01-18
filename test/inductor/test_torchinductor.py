@@ -779,6 +779,16 @@ def skip_if_halide(fn):
     return wrapper
 
 
+def skip_if_mps(fn):
+    @functools.wraps(fn)
+    def wrapper(self):
+        if is_mps_backend(self.device):
+            raise unittest.SkipTest("mps not supported")
+        return fn(self)
+
+    return wrapper
+
+
 def skip_if_triton(fn):
     @functools.wraps(fn)
     def wrapper(self):
@@ -803,6 +813,10 @@ def is_halide_backend(device):
     if getattr(device, "type", device) == "cpu":
         return config.cpu_backend == "halide"
     return config.cuda_backend == "halide"
+
+
+def is_mps_backend(device):
+    return getattr(device, "type", device) == "mps"
 
 
 def is_triton_backend(device):
@@ -2778,6 +2792,7 @@ class CommonTemplate:
 
         self.common(fn, (torch.randn(8, 8), torch.randn(8, 8)))
 
+    @skipIfXpu(msg="logaddexp_xpu not implemented for ComplexFloat")
     @skipCUDAIf(True, "Not implemented for CUDA")
     def test_logaddexp(self):
         self.common(
